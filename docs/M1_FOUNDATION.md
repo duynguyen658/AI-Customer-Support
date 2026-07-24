@@ -15,6 +15,7 @@ No AI functionality is implemented in this milestone.
 - Alembic migrations for schema creation.
 - Structlog JSON logging.
 - Pytest API tests with dependency-overridden isolated database sessions.
+- PostgreSQL integration tests that run Alembic migrations against a dedicated test database.
 - Docker Compose for PostgreSQL 16 and the API service.
 
 ## Folder Structure
@@ -84,11 +85,12 @@ FastAPI startup does not create tables automatically.
 ## Tests
 
 ```bash
-pytest -q
-pytest --cov=app --cov-report=term-missing
+pytest -q -m "not integration"
+pytest -q -m integration
+pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=75
 ```
 
-The test suite overrides the FastAPI database dependency and uses an isolated in-memory database. This prevents tests from modifying a production or local PostgreSQL database.
+Fast tests override the FastAPI database dependency and use an isolated in-memory database. PostgreSQL integration tests require `TEST_DATABASE_URL`, refuse non-test database names, reset only the dedicated test schema, and create schema through Alembic migrations rather than `Base.metadata.create_all`.
 
 ## Completed
 
@@ -101,7 +103,9 @@ The test suite overrides the FastAPI database dependency and uses an isolated in
 - Structured 404 and infrastructure error responses.
 - Atomic ticket creation with rollback.
 - Dockerfile and Docker Compose.
-- Automated tests for health, validation, retrieval, listing, events, and rollback.
+- Automated tests for health, validation, retrieval, listing, events, rollback, database-health failure, and PostgreSQL migrations.
+- Redundant non-unique `ix_tickets_ticket_code` index removal while preserving unique ticket-code enforcement.
+- CI workflow for migrations, tests, PostgreSQL integration tests, and coverage.
 - README and milestone documentation.
 
 ## Not Implemented Yet
@@ -121,9 +125,9 @@ The test suite overrides the FastAPI database dependency and uses an isolated in
 
 - Authentication and authorization are intentionally out of scope.
 - Background workers are intentionally out of scope.
-- Tests use an isolated override database; run Alembic against PostgreSQL locally to validate the production migration path.
+- PostgreSQL integration tests require a dedicated PostgreSQL test database.
+- CI workflow has been added; remote pass/fail status depends on GitHub Actions execution.
 
 ## Next Milestone Overview
 
 The next milestone can add controlled AI classification and confidence handling after the foundation is verified in PostgreSQL. It should keep model/provider logic separate from ticket persistence and preserve auditability through ticket events.
-

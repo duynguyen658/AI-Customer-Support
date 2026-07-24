@@ -3,12 +3,17 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.ticket import TicketStatus, utc_now
 from app.models.ticket_event import TicketEvent
 from app.repositories.ticket_repository import TicketRepository
+from app.services.ticket_service import (
+    TicketService,
+    is_ticket_code_unique_violation,
+)
 
 
 def create_ticket(client: TestClient, payload: dict[str, str]) -> dict:
@@ -169,3 +174,116 @@ def test_ticket_creation_rolls_back_when_event_persistence_fails(
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "TICKET_PERSISTENCE_FAILED"
     assert TicketRepository(db_session).count_tickets() == 0
+    assert db_session.scalar(select(func.count()).select_from(TicketEvent)) == 0
+
+
+def test_ticket_code_collision_retries_and_eventually_succeeds(
+    client: TestClient,
+    valid_ticket_payload: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codes = iter(["TKT-COLLISION", "TKT-COLLISION", "TKT-UNIQUE"])
+    monkeypatch.setattr(TicketService, "_generate_ticket_code", staticmethod(lambda: next(codes)))
+
+    first = client.post("/api/v1/tickets", json=valid_ticket_payload)
+    second = client.post(
+        "/api/v1/tickets",
+        json={**valid_ticket_payload, "customer_email": "second@example.com"},
+    )
+
+    assert first.status_code == 201
+    assert first.json()["ticket_code"] == "TKT-COLLISION"
+    assert second.status_code == 201
+    assert second.json()["ticket_code"] == "TKT-UNIQUE"
+
+
+def test_repeated_ticket_code_collisions_exhaust_retry_limit(
+    client: TestClient,
+    db_session: Session,
+    valid_ticket_payload: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(TicketService, "_generate_ticket_code", staticmethod(lambda: "TKT-SAME"))
+
+    first = client.post("/api/v1/tickets", json=valid_ticket_payload)
+    second = client.post(
+        "/api/v1/tickets",
+        json={**valid_ticket_payload, "customer_email": "second@example.com"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "TICKET_CODE_GENERATION_FAILED"
+    assert TicketRepository(db_session).count_tickets() == 1
+    assert db_session.scalar(select(func.count()).select_from(TicketEvent)) == 1
+
+
+def test_unrelated_integrity_error_does_not_retry(
+    client: TestClient,
+    db_session: Session,
+    valid_ticket_payload: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"codes": 0}
+
+    def generate_code() -> str:
+        calls["codes"] += 1
+        return f"TKT-UNRELATED-{calls['codes']}"
+
+    def fail_add_event(self: TicketRepository, event: TicketEvent) -> TicketEvent:
+        raise IntegrityError("insert", {}, Exception("foreign key violation"))
+
+    monkeypatch.setattr(TicketService, "_generate_ticket_code", staticmethod(generate_code))
+    monkeypatch.setattr(TicketRepository, "add_event", fail_add_event)
+
+    response = client.post("/api/v1/tickets", json=valid_ticket_payload)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "TICKET_PERSISTENCE_FAILED"
+    assert calls["codes"] == 1
+    assert TicketRepository(db_session).count_tickets() == 0
+    assert db_session.scalar(select(func.count()).select_from(TicketEvent)) == 0
+
+
+def test_ticket_without_event_is_not_committed_after_flush_failure(
+    client: TestClient,
+    db_session: Session,
+    valid_ticket_payload: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_flush() -> None:
+        raise SQLAlchemyError("simulated flush failure")
+
+    monkeypatch.setattr(db_session, "flush", fail_flush)
+
+    response = client.post("/api/v1/tickets", json=valid_ticket_payload)
+
+    assert response.status_code == 503
+    assert TicketRepository(db_session).count_tickets() == 0
+    assert db_session.scalar(select(func.count()).select_from(TicketEvent)) == 0
+
+
+def test_is_ticket_code_unique_violation_supports_postgres_constraint() -> None:
+    class Diag:
+        constraint_name = "tickets_ticket_code_key"
+
+    class Orig:
+        sqlstate = "23505"
+        diag = Diag()
+
+    exc = IntegrityError("insert", {}, Orig())
+
+    assert is_ticket_code_unique_violation(exc) is True
+
+
+def test_is_ticket_code_unique_violation_rejects_other_postgres_constraints() -> None:
+    class Diag:
+        constraint_name = "tickets_customer_email_key"
+
+    class Orig:
+        sqlstate = "23505"
+        diag = Diag()
+
+    exc = IntegrityError("insert", {}, Orig())
+
+    assert is_ticket_code_unique_violation(exc) is False

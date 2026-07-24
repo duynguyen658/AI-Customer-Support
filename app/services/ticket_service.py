@@ -16,6 +16,31 @@ from app.schemas.ticket import TicketCreate
 
 logger = structlog.get_logger(__name__)
 
+POSTGRES_UNIQUE_VIOLATION = "23505"
+TICKET_CODE_CONSTRAINT_NAMES = {
+    "tickets_ticket_code_key",
+    "uq_tickets_ticket_code",
+}
+MAX_TICKET_CODE_ATTEMPTS = 5
+
+
+def is_ticket_code_unique_violation(exc: IntegrityError) -> bool:
+    """Return True only for unique violations on the ticket_code constraint."""
+
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    diag = getattr(orig, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+
+    if sqlstate == POSTGRES_UNIQUE_VIOLATION:
+        return constraint_name in TICKET_CODE_CONSTRAINT_NAMES
+
+    message = str(orig).lower() if orig is not None else str(exc).lower()
+    return (
+        "unique constraint failed" in message
+        and "tickets.ticket_code" in message
+    )
+
 
 class TicketService:
     def __init__(self, db: Session) -> None:
@@ -23,7 +48,7 @@ class TicketService:
         self.repository = TicketRepository(db)
 
     def create_ticket(self, payload: TicketCreate) -> Ticket:
-        for attempt in range(5):
+        for attempt in range(MAX_TICKET_CODE_ATTEMPTS):
             ticket = Ticket(
                 ticket_code=self._generate_ticket_code(),
                 channel=payload.channel.strip().lower(),
@@ -51,15 +76,29 @@ class TicketService:
                 self.db.flush()
                 self.db.commit()
                 self.db.refresh(ticket)
-            except IntegrityError:
+            except IntegrityError as exc:
                 self.db.rollback()
-                if attempt < 4:
+                if is_ticket_code_unique_violation(exc) and attempt < MAX_TICKET_CODE_ATTEMPTS - 1:
+                    logger.warning(
+                        "ticket_code_collision_retry",
+                        attempt=attempt + 1,
+                        max_attempts=MAX_TICKET_CODE_ATTEMPTS,
+                    )
                     continue
-                logger.error("ticket_code_collision_exhausted")
-                raise InfrastructureError(
-                    message="Could not create a unique ticket code.",
-                    code="TICKET_CODE_GENERATION_FAILED",
+                if is_ticket_code_unique_violation(exc):
+                    logger.error("ticket_code_collision_exhausted")
+                    raise InfrastructureError(
+                        message="Could not create a unique ticket code.",
+                        code="TICKET_CODE_GENERATION_FAILED",
+                    ) from exc
+                logger.error(
+                    "ticket_creation_integrity_failure",
+                    error_type=type(exc).__name__,
                 )
+                raise InfrastructureError(
+                    message="Could not persist the ticket.",
+                    code="TICKET_PERSISTENCE_FAILED",
+                ) from exc
             except SQLAlchemyError as exc:
                 self.db.rollback()
                 logger.error(
@@ -102,4 +141,3 @@ class TicketService:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         suffix = secrets.token_hex(3).upper()
         return f"TKT-{timestamp}-{suffix}"
-

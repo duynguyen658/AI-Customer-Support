@@ -138,8 +138,6 @@ class Ticket(Base):
     )
 
 
-Index("ix_tickets_ticket_code", Ticket.ticket_code)
 Index("ix_tickets_customer_email", Ticket.customer_email)
 Index("ix_tickets_status", Ticket.status)
 Index("ix_tickets_created_at", Ticket.created_at)
-

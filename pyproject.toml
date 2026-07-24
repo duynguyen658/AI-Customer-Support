@@ -1,4 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-
+markers = [
+  "integration: tests requiring PostgreSQL",
+]
+addopts = "--strict-markers"

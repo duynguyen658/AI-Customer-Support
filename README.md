@@ -1,76 +1,84 @@
 # AI Customer Support Automation System
 
-Python backend for an AI Applied Specialist technical assessment. The system is being built incrementally to receive and manage customer-support requests before later AI automation milestones.
+Python backend for an AI Applied Specialist technical assessment. The current scope is Milestone 1: Foundation and Ticket Management.
 
-## Current Milestone
+## M1 Scope
 
-Milestone 1: Foundation and Ticket Management.
+Implemented:
 
-Implemented now:
-
-- FastAPI service
-- PostgreSQL persistence model
+- FastAPI service with Swagger at `http://localhost:8000/docs`
+- PostgreSQL persistence with SQLAlchemy 2
 - Alembic migrations
 - Ticket creation, listing, detail, and event history
+- Atomic Ticket and TicketEvent creation
 - Structured 404 and infrastructure errors
 - Health checks
-- Structured logging
+- Structured JSON logging
 - Docker Compose setup
-- Automated tests
+- Fast SQLite tests and PostgreSQL integration tests
+- GitHub Actions CI workflow
 
-AI features are not implemented in this milestone.
+Deferred to later milestones: LLM classification, prompt engineering, RAG, knowledge base, spam detection, duplicate detection, missing-information detection, human review, dashboard, n8n, external channels, authentication, Redis, and Celery.
 
 ## Technology Stack
 
+Python 3.11, FastAPI, Uvicorn, Pydantic v2, pydantic-settings, SQLAlchemy 2, PostgreSQL 16, psycopg 3, Alembic, structlog, Pytest, HTTPX, Docker, and Docker Compose.
+
+## Prerequisites
+
 - Python 3.11
-- FastAPI
-- Uvicorn
-- Pydantic v2
-- pydantic-settings
-- SQLAlchemy 2
-- PostgreSQL 16
-- psycopg 3
-- Alembic
-- structlog
-- Pytest
-- HTTPX
-- Docker and Docker Compose
+- Docker Desktop or Docker Engine with Compose
+- Git
 
-## Environment Setup
+## Windows PowerShell Setup
 
-Create a virtual environment and install dependencies:
-
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
+Copy-Item .env.example .env
 pip install -r requirements.txt
 ```
 
-Create local environment settings:
+## Linux / WSL Setup
 
 ```bash
-copy .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
+cp .env.example .env
+pip install -r requirements.txt
 ```
-
-For local Docker, `.env.example` already contains safe development defaults.
 
 ## Docker Startup
 
+Stable demo startup:
+
 ```bash
-docker compose up --build
+docker compose down -v
+docker compose up --build -d
+docker compose ps
+docker compose logs api --tail=200
 ```
 
-The API listens on `http://localhost:8000`.
+The API container waits for PostgreSQL to become healthy, runs `alembic upgrade head`, then starts Uvicorn on port `8000`.
 
-Swagger UI:
+Stop and reset Docker data:
 
-```text
-http://localhost:8000/docs
+```bash
+docker compose down -v
 ```
+
+## Health Checks
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/health/db
+```
+
+`/health` does not require database access. `/health/db` runs a lightweight `SELECT 1`.
 
 ## Migrations
 
-With PostgreSQL reachable and `DATABASE_URL` configured:
+Alembic reads `DATABASE_URL`.
 
 ```bash
 alembic upgrade head
@@ -78,26 +86,80 @@ alembic current
 alembic history
 ```
 
-The application does not create tables on startup. Schema creation is handled by Alembic.
+The application does not call `Base.metadata.create_all` during startup.
 
 ## Tests
 
+Fast tests using isolated SQLite fixtures:
+
+```bash
+pytest -q -m "not integration"
+```
+
+PostgreSQL integration tests:
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+$env:TEST_DATABASE_URL = "postgresql+psycopg://support_test:support_test@localhost:5433/support_test"
+pytest -q -m integration
+```
+
+Linux / WSL:
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+export TEST_DATABASE_URL="postgresql+psycopg://support_test:support_test@localhost:5433/support_test"
+pytest -q -m integration
+```
+
+Complete suite and coverage:
+
 ```bash
 pytest -q
-pytest --cov=app --cov-report=term-missing
+pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=75
 ```
 
-Tests override the database dependency and do not modify production databases.
+Integration tests refuse to run destructive setup unless the target database name contains `test`.
 
-## Example Ticket Request
+## Example Requests
+
+Bash:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/tickets ^
-  -H "Content-Type: application/json" ^
-  -d "{\"channel\":\"web\",\"customer_name\":\"Minh Nguyen\",\"customer_email\":\"minh@example.com\",\"subject\":\"Cannot access account\",\"content\":\"I cannot access my account after resetting the password.\"}"
+curl -X POST http://localhost:8000/api/v1/tickets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "web",
+    "customer_name": "Minh Duy",
+    "customer_email": "minhduy@example.com",
+    "subject": "Payment has not been updated",
+    "content": "I completed the payment but the transaction is not visible."
+  }'
 ```
 
-## Project Status
+PowerShell:
 
-Milestone 1 is implemented. Later milestones may add AI classification, retrieval, spam or duplicate detection, missing-information checks, human review, dashboards, and integrations.
+```powershell
+$body = @{
+  channel = "web"
+  customer_name = "Minh Duy"
+  customer_email = "minhduy@example.com"
+  subject = "Payment has not been updated"
+  content = "I completed the payment but the transaction is not visible."
+} | ConvertTo-Json
 
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/v1/tickets" -ContentType "application/json" -Body $body
+```
+
+List tickets:
+
+```bash
+curl "http://localhost:8000/api/v1/tickets?limit=20&offset=0"
+```
+
+## Known Limitations
+
+- No authentication or authorization yet.
+- No background workers.
+- PostgreSQL integration tests require a dedicated `TEST_DATABASE_URL`.
+- GitHub Actions workflow is configured, but remote CI status depends on the workflow running on GitHub.
